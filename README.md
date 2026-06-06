@@ -1,23 +1,24 @@
 # Matrix-Free Hybrid Jacobi Solver
 
-This repository contains Challenge 3 for the PACS course: a matrix-free solver for
+This repository contains my solution for Challenge 3 of the PACS course: a
+matrix-free Jacobi solver for
 
 ```text
 -Delta u = f  in (0,1)^2,
 u = g         on the boundary.
 ```
 
-The default problem is the one requested in the assignment:
+The default test problem is the one from the assignment:
 
 ```text
 f(x,y) = 8*pi^2 sin(2*pi*x) sin(2*pi*y),
 u(x,y) = sin(2*pi*x) sin(2*pi*y).
 ```
 
-The implementation uses only standard C++ plus the MPI/OpenMP tools covered in the
-lectures: `MPI_Init`, `MPI_Comm_rank`, `MPI_Comm_size`, `MPI_Sendrecv`,
-`MPI_Allreduce`, `MPI_Gatherv`, `MPI_Barrier`, OpenMP `parallel for` with a
-`reduction`, a direct `Makefile`, `<chrono>`, and `<filesystem>`.
+I kept the implementation close to the tools used during the course: standard
+C++, MPI, OpenMP, a direct `Makefile`, `<chrono>`, and `<filesystem>`. The MPI
+calls used in the code are `MPI_Init`, `MPI_Comm_rank`, `MPI_Comm_size`,
+`MPI_Sendrecv`, `MPI_Allreduce`, `MPI_Gatherv`, and `MPI_Barrier`.
 
 ## Repository Layout
 
@@ -29,21 +30,21 @@ Makefile            Build rules
 README.md           This file
 ```
 
-No matrix for the discrete Laplacian is assembled. Each rank owns a balanced block
-of consecutive grid rows, plus two ghost rows used to exchange data with adjacent
-MPI ranks.
+The code does not assemble the matrix of the discrete Laplacian. Each MPI rank
+owns a block of consecutive rows and two ghost rows, one above and one below the
+local block.
 
 ## Build
 
-The expected build environment is a Linux machine or cluster with an MPI C++
-compiler wrapper and OpenMP support:
+The expected environment is Linux with an MPI C++ compiler wrapper and OpenMP
+support:
 
 ```bash
 make
 ```
 
-By default the `Makefile` uses `mpic++` and `-fopenmp`. You can override them from
-the command line:
+By default the `Makefile` uses `mpic++` and `-fopenmp`. These can still be
+overridden from the command line, for example:
 
 ```bash
 make CXX=mpic++ CXXFLAGS="-std=c++20 -O3 -Wall -Wextra -pedantic -fopenmp"
@@ -51,13 +52,13 @@ make CXX=mpic++ CXXFLAGS="-std=c++20 -O3 -Wall -Wextra -pedantic -fopenmp"
 
 ## Run
 
-The number of MPI tasks is selected by the user through `mpiexec -n`.
+The number of MPI ranks is chosen with `mpiexec -n`:
 
 ```bash
 mpiexec -n 4 ./laplace_jacobi --n 128 --tol 1e-8 --max-it 200000
 ```
 
-Set the number of OpenMP threads with the usual environment variable:
+The number of OpenMP threads is set with `OMP_NUM_THREADS`:
 
 ```bash
 OMP_NUM_THREADS=2 mpiexec -n 4 ./laplace_jacobi --n 128
@@ -67,7 +68,7 @@ Useful options:
 
 ```text
 --n <int>              Grid points per direction.
---tol <real>           Local convergence tolerance.
+--tol <real>           Global convergence tolerance.
 --max-it <int>         Maximum Jacobi iterations.
 --forcing <name>       sine, zero, poly.
 --boundary <name>      homogeneous, exact.
@@ -77,23 +78,22 @@ Useful options:
 --quiet                Print one CSV result line only.
 ```
 
-The `poly` forcing is a small extra test with non-homogeneous Dirichlet data:
+The `poly` forcing is an extra check with non-homogeneous Dirichlet data:
 `u(x,y)=x^2+y^2`, `f=-4`, and `--boundary exact`.
 
 ## Numerical Method
 
-Rows are distributed as evenly as possible among MPI ranks. At every Jacobi
+Rows are distributed as evenly as possible among the MPI ranks. At every Jacobi
 iteration:
 
-1. Each rank exchanges its first and last owned rows with adjacent ranks using
-   `MPI_Sendrecv`.
-2. Interior points are updated with the four-point stencil.
-3. The local squared increment is accumulated with an OpenMP reduction.
-4. Each rank checks its own local norm, then `MPI_Allreduce` sums the boolean
-   convergence flags. The solver stops only when all ranks are locally converged.
+1. each rank exchanges its first and last owned rows with the adjacent ranks;
+2. the interior points are updated with the five-point finite-difference stencil;
+3. the local squared update is accumulated with an OpenMP reduction;
+4. `MPI_Allreduce` sums the local contributions, and the solver stops when the
+   global h-weighted increment norm is below `--tol`.
 
-The reported increment and exact error use the discrete norm requested in the
-assignment:
+The increment norm and the exact error are reported with the discrete norm used
+in the assignment:
 
 ```text
 sqrt(h * sum_ij value_ij^2).
@@ -101,7 +101,7 @@ sqrt(h * sum_ij value_ij^2).
 
 ## Output
 
-Rank 0 gathers the complete solution with `MPI_Gatherv`.
+Rank 0 gathers the full solution with `MPI_Gatherv`.
 
 By default the code writes:
 
@@ -109,11 +109,10 @@ By default the code writes:
 output/solution.vtk
 ```
 
-The VTK file is a legacy ASCII `STRUCTURED_POINTS` dataset and can be opened in
-ParaView. It contains three scalar fields: `solution`, `exact`, and
-`point_error`.
+The VTK file is a legacy ASCII `STRUCTURED_POINTS` file and can be opened in
+ParaView. It contains `solution`, `exact`, and `point_error` scalar fields.
 
-To also export explicit grid coordinates:
+To also write a CSV file with the grid coordinates:
 
 ```bash
 mpiexec -n 4 ./laplace_jacobi --n 64 --csv output/solution.csv
@@ -121,23 +120,28 @@ mpiexec -n 4 ./laplace_jacobi --n 64 --csv output/solution.csv
 
 ## Tests and Scalability
 
-Run the scalability script with:
+The scalability script is:
 
 ```bash
 bash test/run_scalability.sh
 ```
 
-It builds the code, runs `n = 2^k`, `k = 4,...,8`, with 1, 2, and 4 MPI ranks,
-stores the data in `test/data/performance.csv`, records hardware information in
-`test/hw.info`, and creates `test/performance.png` if `gnuplot` is available.
+It builds the code and runs `n = 16, 32, 64, 128, 256` with 1, 2, and 4 MPI
+ranks. The script writes the data in `test/data/performance.csv`, saves hardware
+information in `test/hw.info`, and creates `test/performance.png` if `gnuplot`
+is available.
+
+By default it assumes an 8-core node. To keep the total number of OpenMP threads
+fixed, the runs with 1, 2, and 4 MPI ranks use 8, 4, and 2 OpenMP threads per
+rank.
 
 The defaults can be changed without editing the script:
 
 ```bash
-NS="16 32 64" PROCS="1 2" OMP_NUM_THREADS=2 TOL=1e-6 MAX_IT=50000 bash test/run_scalability.sh
+NS="16 32 64" PROCS="1 2" TOTAL_CORES=4 TOL=1e-6 MAX_IT=50000 bash test/run_scalability.sh
 ```
 
-On small local OpenMPI installations you may need oversubscription for 4 ranks:
+On small local OpenMPI installations, the 4-rank run may need oversubscription:
 
 ```bash
 MPIEXEC_FLAGS="--oversubscribe" bash test/run_scalability.sh

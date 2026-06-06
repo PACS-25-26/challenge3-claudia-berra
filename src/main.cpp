@@ -1,3 +1,9 @@
+/**
+ * @file main.cpp
+ * @brief Entry point: initialises MPI, parses options, runs the solver,
+ *        gathers the solution on rank 0 and writes output files.
+ */
+
 #include "CommandLine.hpp"
 #include "JacobiSolver.hpp"
 #include "Output.hpp"
@@ -14,6 +20,12 @@
 #include <stdexcept>
 #include <vector>
 
+/**
+ * @brief Program entry point.
+ * @param argc Argument count received from the command line.
+ * @param argv Argument values received from the command line.
+ * @return Zero on success, non-zero if parsing, solving, or output fails.
+ */
 int main(int argc, char **argv)
 {
     MPI_Init(&argc, &argv);
@@ -32,17 +44,13 @@ int main(int argc, char **argv)
         if (options.help)
         {
             if (mpi_rank == 0)
-            {
                 laplace::print_usage(std::cout, argv[0]);
-            }
             MPI_Finalize();
             return 0;
         }
 
         if (mpi_size > options.n)
-        {
             throw std::invalid_argument("Use no more MPI ranks than grid rows.");
-        }
 
         laplace::JacobiSolver solver(options.n,
                                      options.tolerance,
@@ -59,13 +67,9 @@ int main(int argc, char **argv)
         if (mpi_rank == 0)
         {
             if (options.write_vtk)
-            {
                 laplace::write_vtk(options.vtk_file, options.n, global_solution, options.forcing);
-            }
             if (options.write_csv)
-            {
                 laplace::write_csv(options.csv_file, options.n, global_solution, options.forcing);
-            }
 
 #ifdef _OPENMP
             const int openmp_threads = omp_get_max_threads();
@@ -101,13 +105,9 @@ int main(int argc, char **argv)
                           << "elapsed seconds    : " << result.elapsed_seconds << '\n';
 
                 if (options.write_vtk)
-                {
                     std::cout << "VTK output         : " << options.vtk_file << '\n';
-                }
                 if (options.write_csv)
-                {
                     std::cout << "CSV output         : " << options.csv_file << '\n';
-                }
             }
         }
     }

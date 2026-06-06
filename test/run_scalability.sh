@@ -7,7 +7,7 @@ MPIEXEC="${MPIEXEC:-mpiexec}"
 MPIEXEC_FLAGS="${MPIEXEC_FLAGS:-}"
 NS="${NS:-16 32 64 128 256}"
 PROCS="${PROCS:-1 2 4}"
-OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+TOTAL_CORES="${TOTAL_CORES:-8}"
 TOL="${TOL:-1e-6}"
 MAX_IT="${MAX_IT:-200000}"
 DATA_DIR="${ROOT_DIR}/test/data"
@@ -17,6 +17,11 @@ PLOT_FILE="${ROOT_DIR}/test/performance.png"
 
 mkdir -p "${DATA_DIR}"
 read -r -a MPIEXEC_FLAGS_ARRAY <<< "${MPIEXEC_FLAGS}"
+
+if ! [[ "${TOTAL_CORES}" =~ ^[0-9]+$ ]] || (( TOTAL_CORES < 1 )); then
+    echo "TOTAL_CORES must be a positive integer." >&2
+    exit 1
+fi
 
 make -C "${ROOT_DIR}"
 
@@ -30,8 +35,18 @@ echo "n,processes,omp_threads,iterations,converged,increment_norm,exact_l2_error
 
 for n in ${NS}; do
     for p in ${PROCS}; do
-        echo "Running n=${n}, MPI ranks=${p}, OpenMP threads=${OMP_NUM_THREADS}"
-        line="$(OMP_NUM_THREADS="${OMP_NUM_THREADS}" "${MPIEXEC}" "${MPIEXEC_FLAGS_ARRAY[@]}" -n "${p}" "${EXEC}" \
+        if ! [[ "${p}" =~ ^[0-9]+$ ]] || (( p < 1 )); then
+            echo "PROCS entries must be positive integers." >&2
+            exit 1
+        fi
+
+        threads=$(( TOTAL_CORES / p ))
+        if (( threads < 1 )); then
+            threads=1
+        fi
+
+        echo "Running n=${n}, MPI ranks=${p}, OpenMP threads=${threads}"
+        line="$(OMP_NUM_THREADS="${threads}" "${MPIEXEC}" "${MPIEXEC_FLAGS_ARRAY[@]}" -n "${p}" "${EXEC}" \
             --n "${n}" \
             --tol "${TOL}" \
             --max-it "${MAX_IT}" \
@@ -54,7 +69,8 @@ The scalability test was run with:
 NS=${NS}
 PROCS=${PROCS}
 MPIEXEC_FLAGS=${MPIEXEC_FLAGS}
-OMP_NUM_THREADS=${OMP_NUM_THREADS}
+TOTAL_CORES=${TOTAL_CORES}
+OMP_NUM_THREADS=floor(TOTAL_CORES / MPI ranks), minimum 1
 TOL=${TOL}
 MAX_IT=${MAX_IT}
 \`\`\`
@@ -74,16 +90,21 @@ cat >> "${RESULT_FILE}" <<EOF_RESULT
 
 ## Discussion
 
-The run with one MPI rank is the serial baseline. The parallel runs exchange only
-one row with each adjacent rank at every iteration, so the communication pattern
-is local and simple. For small grids the timing may be worse with more ranks,
-because the amount of local work is too small to compensate for MPI
-communication and synchronization. As n increases, each rank owns more interior
-points and the parallel runs are expected to become more competitive.
+The run with one MPI rank is the baseline for the same total core budget. For
+parallel runs, the script keeps the total OpenMP thread budget approximately
+constant by assigning fewer OpenMP threads to each rank as the number of MPI
+ranks increases.
+
+Each Jacobi iteration exchanges one row with each adjacent rank and then uses a
+global MPI_Allreduce to compute the h-weighted increment norm. For small grids
+the timing may be worse with more ranks, because the amount of local stencil
+work is too small to compensate for MPI communication and synchronization. As n
+increases, each rank owns more interior points and the parallel runs are
+expected to become more competitive.
 
 The Jacobi method is intentionally simple and matrix-free, but it converges
-slowly. If a row has \`converged = 0\`, the run reached \`MAX_IT\` before all
-ranks satisfied the local stopping criterion.
+slowly. If a row has \`converged = 0\`, the run reached \`MAX_IT\` before the
+global increment norm went below the requested tolerance.
 EOF_RESULT
 
 echo "Wrote ${CSV_FILE}"

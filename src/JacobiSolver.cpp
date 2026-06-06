@@ -1,3 +1,8 @@
+/**
+ * @file JacobiSolver.cpp
+ * @brief Jacobi solver implementation (hybrid MPI+OpenMP).
+ */
+
 #include "JacobiSolver.hpp"
 
 #include <algorithm>
@@ -33,6 +38,8 @@ JacobiSolver::JacobiSolver(int n,
     MPI_Comm_rank(communicator_, &mpi_rank);
 
     decomposition_ = make_row_decomposition(n_, mpi_size, mpi_rank);
+
+    // One ghost row above and one below the local block.
     current_.assign(static_cast<std::size_t>(decomposition_.local_rows + 2) * n_, 0.0);
     next_.assign(current_.size(), 0.0);
 
@@ -64,9 +71,7 @@ SolverResult JacobiSolver::solve()
         {
             const int global_row = first_row + local_row - 1;
             if (global_row == 0 || global_row == n - 1)
-            {
                 continue;
-            }
 
             const double y = static_cast<double>(global_row) * h;
             for (int column = 1; column < n - 1; ++column)
@@ -84,29 +89,17 @@ SolverResult JacobiSolver::solve()
         }
 
         double global_squared_update = 0.0;
-        MPI_Allreduce(&local_squared_update,
-                      &global_squared_update,
-                      1,
-                      MPI_DOUBLE,
-                      MPI_SUM,
-                      communicator_);
+        MPI_Allreduce(&local_squared_update, &global_squared_update,
+                      1, MPI_DOUBLE, MPI_SUM, communicator_);
 
-        const double local_increment_norm = std::sqrt(h_ * local_squared_update);
-        const int local_has_converged = local_increment_norm < tolerance_ ? 1 : 0;
-        int number_of_converged_ranks = 0;
-        MPI_Allreduce(&local_has_converged,
-                      &number_of_converged_ranks,
-                      1,
-                      MPI_INT,
-                      MPI_SUM,
-                      communicator_);
+        const double global_increment_norm = std::sqrt(h_ * global_squared_update);
 
         current_.swap(next_);
 
         result.iterations = iteration;
-        result.increment_norm = std::sqrt(h_ * global_squared_update);
+        result.increment_norm = global_increment_norm;
 
-        if (number_of_converged_ranks == decomposition_.mpi_size)
+        if (global_increment_norm < tolerance_)
         {
             result.converged = true;
             break;
@@ -140,6 +133,7 @@ void JacobiSolver::gather_solution(std::vector<double> &global_solution) const
         }
     }
 
+    // Skip the leading ghost row when sending.
     MPI_Gatherv(current_.data() + n_,
                 decomposition_.local_rows * n_,
                 MPI_DOUBLE,
@@ -151,20 +145,9 @@ void JacobiSolver::gather_solution(std::vector<double> &global_solution) const
                 communicator_);
 }
 
-const RowDecomposition &JacobiSolver::decomposition() const
-{
-    return decomposition_;
-}
-
-int JacobiSolver::n() const
-{
-    return n_;
-}
-
-double JacobiSolver::h() const
-{
-    return h_;
-}
+const RowDecomposition &JacobiSolver::decomposition() const { return decomposition_; }
+int JacobiSolver::n() const { return n_; }
+double JacobiSolver::h() const { return h_; }
 
 int JacobiSolver::index(int local_row, int column) const
 {
@@ -192,35 +175,19 @@ void JacobiSolver::initialize()
 
 void JacobiSolver::exchange_ghost_rows()
 {
-    const int upper_rank = decomposition_.mpi_rank == 0 ? MPI_PROC_NULL : decomposition_.mpi_rank - 1;
-    const int lower_rank = decomposition_.mpi_rank == decomposition_.mpi_size - 1 ? MPI_PROC_NULL
-                                                                                  : decomposition_.mpi_rank + 1;
+    // MPI_PROC_NULL turns sends/receives at the domain boundary into no-ops.
+    const int upper_rank = decomposition_.mpi_rank == 0
+                               ? MPI_PROC_NULL : decomposition_.mpi_rank - 1;
+    const int lower_rank = decomposition_.mpi_rank == decomposition_.mpi_size - 1
+                               ? MPI_PROC_NULL : decomposition_.mpi_rank + 1;
 
-    MPI_Sendrecv(&current_[index(1, 0)],
-                 n_,
-                 MPI_DOUBLE,
-                 upper_rank,
-                 10,
-                 &current_[index(decomposition_.local_rows + 1, 0)],
-                 n_,
-                 MPI_DOUBLE,
-                 lower_rank,
-                 10,
-                 communicator_,
-                 MPI_STATUS_IGNORE);
+    MPI_Sendrecv(&current_[index(1, 0)], n_, MPI_DOUBLE, upper_rank, 10,
+                 &current_[index(decomposition_.local_rows + 1, 0)], n_, MPI_DOUBLE, lower_rank, 10,
+                 communicator_, MPI_STATUS_IGNORE);
 
-    MPI_Sendrecv(&current_[index(decomposition_.local_rows, 0)],
-                 n_,
-                 MPI_DOUBLE,
-                 lower_rank,
-                 20,
-                 &current_[index(0, 0)],
-                 n_,
-                 MPI_DOUBLE,
-                 upper_rank,
-                 20,
-                 communicator_,
-                 MPI_STATUS_IGNORE);
+    MPI_Sendrecv(&current_[index(decomposition_.local_rows, 0)], n_, MPI_DOUBLE, lower_rank, 20,
+                 &current_[index(0, 0)], n_, MPI_DOUBLE, upper_rank, 20,
+                 communicator_, MPI_STATUS_IGNORE);
 }
 
 double JacobiSolver::compute_exact_l2_error() const
@@ -238,22 +205,17 @@ double JacobiSolver::compute_exact_l2_error() const
     {
         const int global_row = first_row + local_row - 1;
         const double y = static_cast<double>(global_row) * h;
-
         for (int column = 0; column < n; ++column)
         {
             const double x = static_cast<double>(column) * h;
-            const double difference = current[local_row * n + column] - exact_solution(forcing, x, y);
-            local_squared_error += difference * difference;
+            const double diff = current[local_row * n + column] - exact_solution(forcing, x, y);
+            local_squared_error += diff * diff;
         }
     }
 
     double global_squared_error = 0.0;
-    MPI_Allreduce(&local_squared_error,
-                  &global_squared_error,
-                  1,
-                  MPI_DOUBLE,
-                  MPI_SUM,
-                  communicator_);
+    MPI_Allreduce(&local_squared_error, &global_squared_error,
+                  1, MPI_DOUBLE, MPI_SUM, communicator_);
 
     return std::sqrt(h_ * global_squared_error);
 }
